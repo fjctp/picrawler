@@ -12,6 +12,7 @@ from robot_hat import Robot, utils
 
 import time
 import math
+from typing import List, Tuple, Union, Any, Dict, Optional
 
 class Picrawler(Robot):
     """High-level controller for the Picrawler hexapod robot.
@@ -25,13 +26,13 @@ class Picrawler(Robot):
         OFFSET_FILE: path to persisted servo offsets.
         PIN_LIST: default servo pin mapping.
     """
-    A = 48
-    B = 78
-    C = 33
-    OFFSET_FILE = '/opt/picrawler/picrawler.config'
-    PIN_LIST = [9, 10, 11, 3, 4, 5, 0, 1, 2, 6, 7, 8]
+    A: int = 48
+    B: int = 78
+    C: int = 33
+    OFFSET_FILE: str = '/opt/picrawler/picrawler.config'
+    PIN_LIST: List[int] = [9, 10, 11, 3, 4, 5, 0, 1, 2, 6, 7, 8]
 
-    def __init__(self, pin_list=PIN_LIST, init_angles=None):  
+    def __init__(self, pin_list: List[int] = PIN_LIST, init_angles: Optional[List[float]] = None) -> None:  
         """Initialize the Picrawler robot controller.
 
         Resets the MCU, initializes the base `Robot` and prepares internal
@@ -45,22 +46,22 @@ class Picrawler(Robot):
         super().__init__(pin_list, db=self.OFFSET_FILE, name='picrawler', init_angles=init_angles)
 
         # Predefined gait/motion lists
-        self.move_list = self.MoveList()
+        self.move_list: "Picrawler.MoveList" = self.MoveList()
         # User-extensible additional actions
-        self.move_list_add = {
+        self.move_list_add: Dict[str, Any] = {
             'my action': None
         }
 
         # Named step sequences exposed to callers
-        self.step_list = {
+        self.step_list: Dict[str, Any] = {
             "stand": self.move_list['stand'],
             "sit": self.move_list['sit'],
         }
 
         # internal state used by gaits
-        self.stand_position = 0
+        self.stand_position: int = 0
         # direction multipliers for each servo to flip orientation where required
-        self.direction = [
+        self.direction: List[int] = [
             1,1,-1,
             1,1,1,
             1,1,-1,
@@ -68,11 +69,11 @@ class Picrawler(Robot):
         ]
 
         # current Cartesian coordinates for the four legs
-        self.current_coord = [[60, 0, -30], [60, 0, -30], [60, 0, -30], [60, 0, -30]]
+        self.current_coord: List[List[float]] = [[60, 0, -30], [60, 0, -30], [60, 0, -30], [60, 0, -30]]
         # temporary coordinate buffer used during computations
-        self.coord_temp = [[60, 0, -30], [60, 0, -30], [60, 0, -30], [60, 0, -30]]
+        self.coord_temp: List[List[float]] = [[60, 0, -30], [60, 0, -30], [60, 0, -30], [60, 0, -30]]
 
-    def coord2polar(self, coord):
+    def coord2polar(self, coord: List[float]) -> List[float]:
         """Convert a Cartesian `coord` [x,y,z] to leg joint angles.
 
         Performs inverse-kinematics for a single leg and returns the
@@ -130,7 +131,7 @@ class Picrawler(Robot):
 
         return [round(alpha, 4), round(beta, 4), round(gamma, 4)]
 
-    def polar2coord(self, angles):
+    def polar2coord(self, angles: List[float]) -> List[float]:
         """Convert joint `angles` [alpha,beta,gamma] (degrees) to Cartesian coords.
 
         This is the forward kinematics counterpart to `coord2polar`.
@@ -151,7 +152,7 @@ class Picrawler(Robot):
 
         return [round(x, 4), round(y, 4), round(z, 4)]
 
-    def limit(self,min,max,x):
+    def limit(self, min: float, max: float, x: float) -> float:
         """Clamp `x` to the inclusive range [`min`, `max`]."""
         if x > max:
             return max
@@ -160,7 +161,7 @@ class Picrawler(Robot):
         else:
             return x
 
-    def limit_angle(self,angles):
+    def limit_angle(self, angles: List[float]) -> Tuple[bool, List[float]]:
         """Ensure each angle is within the robot's allowed ranges.
 
         Returns a tuple `(limit_flag, [alpha,beta,gamma])` where `limit_flag`
@@ -187,7 +188,7 @@ class Picrawler(Robot):
 
         return limit_flag, [alpha, beta, gamma]
 
-    def do_action(self, motion_name, step=1, speed=50):
+    def do_action(self, motion_name: str, step: int = 1, speed: int = 50) -> None:
         """Execute a named motion sequence `motion_name`.
 
         Looks up the motion in the built-in `move_list` first; if not
@@ -213,7 +214,7 @@ class Picrawler(Robot):
             except KeyError:
                 print("No such action")
 
-    def set_angle(self, angles_list, speed=50, israise=False):
+    def set_angle(self, angles_list: List[List[float]], speed: int = 50, israise: bool = False) -> List[float]:
         """Apply a list of joint `angles_list` to the servos.
 
         Each entry in `angles_list` is an [alpha,beta,gamma] triple for a
@@ -247,7 +248,7 @@ class Picrawler(Robot):
         self.servo_move(translate_list, speed)
         return list.copy(translate_list)
 
-    def do_step(self, _step, speed=50, israise=False):
+    def do_step(self, _step: Union[str, List[List[float]]], speed: int = 50, israise: bool = False) -> None:
         """Execute a single step description `_step`.
 
         `_step` may be a string key referencing a named gait in
@@ -278,16 +279,16 @@ class Picrawler(Robot):
             return
 
 
-    def current_step_all_leg_angle(self):
+    def current_step_all_leg_angle(self) -> List[float]:
         """Return a copy of the current servo positions (angles)."""
         return list.copy(self.servo_positions)
 
-    def add_action(self,action_name, action_list):
+    def add_action(self, action_name: str, action_list: Any) -> None:
         """Register a user-defined action sequence under `action_name`."""
         self.move_list_add[action_name] = action_list
 
 
-    def cali_helper_web(self, leg, pos, enter):
+    def cali_helper_web(self, leg: int, pos: str, enter: int) -> None:
         """Helper used by the web calibration UI to nudge leg `leg`.
 
         `pos` is one of 'up','down','left','right','high','low'. When
@@ -719,19 +720,19 @@ class Picrawler(Robot):
 
 
 
-    def do_single_leg(self,leg,coodinate=[50,50,-33],speed=50):
+    def do_single_leg(self, leg: int, coodinate: List[float] = [50,50,-33], speed: int = 50) -> None:
         target_coord = self.current_step_all_leg_value()
         target_coord[leg] = coodinate
-        self.do_step(target_coord,speed)
+        self.do_step(target_coord, speed)
  
 
-    def current_step_leg_value(self,leg):
+    def current_step_leg_value(self, leg: int) -> List[float]:
         return list.copy(self.current_coord[leg])
         
-    def current_step_all_leg_value(self):
+    def current_step_all_leg_value(self) -> List[List[float]]:
         return list.copy(self.current_coord)
 
-    def mix_step(self,basic_step,leg,coodinate=[50,50,-33]):
+    def mix_step(self, basic_step: List[List[float]], leg: int, coodinate: List[float] = [50,50,-33]) -> List[List[float]]:
         # Pay attention to adding list(), otherwise the address pointer is returned
         new_step = list(basic_step)
         new_step[leg] = coodinate
