@@ -1,96 +1,159 @@
+"""Picrawler robot control utilities.
+
+This module provides the `Picrawler` robot class built on top of
+`robot_hat.Robot`. It contains conversions between Cartesian coordinates
+and joint angles, gait definitions and helpers for calibration.
+
+Documentation style: concise docstrings for classes and public methods,
+inline comments for non-obvious math and control logic.
+"""
+
 from robot_hat import Robot, utils
 
 import time
 import math
+from typing import List, Tuple, Union, Any, Dict, Optional
 
 class Picrawler(Robot):
-    A = 48
-    B = 78
-    C = 33
-    OFFSET_FILE = '/opt/picrawler/picrawler.config'
-    PIN_LIST = [9, 10, 11, 3, 4, 5, 0, 1, 2, 6, 7, 8]
+    """High-level controller for the Picrawler hexapod robot.
 
-    def __init__(self, pin_list=PIN_LIST, init_angles=None):  
+    Extends `robot_hat.Robot` to provide coordinate -> servo-angle
+    transformations, gait sequences (encapsulated in `MoveList`) and
+    convenience helpers for calibration and actions.
 
+    Attributes:
+        A, B, C: physical linkage lengths used for forward/inverse kinematics.
+        OFFSET_FILE: path to persisted servo offsets.
+        PIN_LIST: default servo pin mapping.
+    """
+    A: int = 48
+    B: int = 78
+    C: int = 33
+    OFFSET_FILE: str = '/opt/picrawler/picrawler.config'
+    PIN_LIST: List[int] = [9, 10, 11, 3, 4, 5, 0, 1, 2, 6, 7, 8]
+
+    def __init__(self, pin_list: List[int] = PIN_LIST, init_angles: Optional[List[float]] = None) -> None:  
+        """Initialize the Picrawler robot controller.
+
+        Resets the MCU, initializes the base `Robot` and prepares internal
+        gait and coordinate state.
+        """
+
+        # Ensure MCU is in a known state before configuring servos
         utils.reset_mcu()
         time.sleep(0.2)
 
         super().__init__(pin_list, db=self.OFFSET_FILE, name='picrawler', init_angles=init_angles)
 
-        self.move_list = self.MoveList()
-        self.move_list_add = {
+        # Predefined gait/motion lists
+        self.move_list: "Picrawler.MoveList" = self.MoveList()
+        # User-extensible additional actions
+        self.move_list_add: Dict[str, Any] = {
             'my action': None
         }
 
-        self.step_list = {
+        # Named step sequences exposed to callers
+        self.step_list: Dict[str, Any] = {
             "stand": self.move_list['stand'],
             "sit": self.move_list['sit'],
         }
 
-        self.stand_position = 0
-        self.direction = [
+        # internal state used by gaits
+        self.stand_position: int = 0
+        # direction multipliers for each servo to flip orientation where required
+        self.direction: List[int] = [
             1,1,-1,
             1,1,1,
             1,1,-1,
             1,1,1,
         ]
 
-        self.current_coord = [[60, 0, -30], [60, 0, -30], [60, 0, -30], [60, 0, -30]]
-        self.coord_temp = [[60, 0, -30], [60, 0, -30], [60, 0, -30], [60, 0, -30]]
+        # current Cartesian coordinates for the four legs
+        self.current_coord: List[List[float]] = [[60, 0, -30], [60, 0, -30], [60, 0, -30], [60, 0, -30]]
+        # temporary coordinate buffer used during computations
+        self.coord_temp: List[List[float]] = [[60, 0, -30], [60, 0, -30], [60, 0, -30], [60, 0, -30]]
 
-    def coord2polar(self, coord):
-        x,y,z = coord
-        
-        L = math.sqrt(x**2+y**2+z**2)
+    def coord2polar(self, coord: List[float]) -> List[float]:
+        """Convert a Cartesian `coord` [x,y,z] to leg joint angles.
+
+        Performs inverse-kinematics for a single leg and returns the
+        angles [alpha, beta, gamma] in degrees. The routine clamps the
+        input vector to avoid unreachable positions and ensures numeric
+        stability.
+        """
+
+        x, y, z = coord
+
+        # distance from origin to target point
+        L = math.sqrt(x**2 + y**2 + z**2)
         if L == 0:
+            # avoid division by zero
             L = 0.1
+
+        # Clamp the vector so it lies within the manipulator's reach
         if L < self.C:
-            temp = self.C/L
+            temp = self.C / L
             x = temp * x
             y = temp * y
-            z = temp * z           
-        elif L > (self.A+self.B+self.C):
-            temp = (self.A+self.B+self.C)/L
+            z = temp * z
+        elif L > (self.A + self.B + self.C):
+            temp = (self.A + self.B + self.C) / L
             x = temp * x
             y = temp * y
-            z = temp * z   
+            z = temp * z
 
-        self.coord_temp.append([x,y,z])
+        # Save adjusted coordinate to the temp buffer
+        self.coord_temp.append([x, y, z])
 
-        w = math.sqrt(math.pow(x,2) + math.pow(y,2))
+        # compute intermediate geometry
+        w = math.sqrt(x**2 + y**2)
         v = w - self.C
-        u = math.sqrt(math.pow(z,2) + math.pow(v,2))
+        u = math.sqrt(z**2 + v**2)
+        # clamp leg extension
         u = max(30, min(91.58, u))
+
+        # law of cosines to get the knee angle (beta)
         cos_angle1 = (self.B**2 + self.A**2 - u**2) / (2 * self.B * self.A)
         beta = math.acos(cos_angle1)
 
+        # compute shoulder/hip angle components
         angle1 = math.atan2(z, v)
-        angle2 = math.acos((self.A**2 + u**2 - self.B**2)/(2*self.A*u))
+        angle2 = math.acos((self.A**2 + u**2 - self.B**2) / (2 * self.A * u))
         alpha = angle2 + angle1
 
+        # yaw around the body (gamma)
         gamma = math.atan2(y, x)
 
+        # convert to degrees and apply offsets used by the robot's kinematic convention
         alpha = 90 - alpha / math.pi * 180
         beta = beta / math.pi * 180 - 90
-        gamma = -(gamma / math.pi * 180 - 45) 
+        gamma = -(gamma / math.pi * 180 - 45)
 
-        return [round(alpha,4), round(beta,4), round(gamma,4)]
+        return [round(alpha, 4), round(beta, 4), round(gamma, 4)]
 
-    def polar2coord(self, angles):
+    def polar2coord(self, angles: List[float]) -> List[float]:
+        """Convert joint `angles` [alpha,beta,gamma] (degrees) to Cartesian coords.
+
+        This is the forward kinematics counterpart to `coord2polar`.
+        """
+
         alpha, beta, gamma = angles
 
-        L1 = math.sqrt(self.A**2+self.B**2-2*self.A*self.B*math.cos((90+alpha)/180*math.pi))
-        angle = math.acos((self.A**2+L1**2-self.B**2)/(2*self.A*L1))*180/math.pi
+        # compute effective link length L1 using the law of cosines
+        L1 = math.sqrt(self.A**2 + self.B**2 - 2 * self.A * self.B * math.cos((90 + alpha) / 180 * math.pi))
+        angle = math.acos((self.A**2 + L1**2 - self.B**2) / (2 * self.A * L1)) * 180 / math.pi
         angle = 90 - beta - angle
-        L = L1*math.cos(angle*math.pi/180) + self.C
+        L = L1 * math.cos(angle * math.pi / 180) + self.C
 
-        x = L*math.sin((45+gamma)*math.pi/180)
-        y = L*math.cos((45+gamma)*math.pi/180)
-        z = L1*math.sin(angle*math.pi/180)
-    
-        return [round(x,4),round(y,4),round(z,4)]
+        # project into body coordinate frame
+        x = L * math.sin((45 + gamma) * math.pi / 180)
+        y = L * math.cos((45 + gamma) * math.pi / 180)
+        z = L1 * math.sin(angle * math.pi / 180)
 
-    def limit(self,min,max,x):
+        return [round(x, 4), round(y, 4), round(z, 4)]
+
+    def limit(self, min: float, max: float, x: float) -> float:
+        """Clamp `x` to the inclusive range [`min`, `max`]."""
         if x > max:
             return max
         elif x < min:
@@ -98,82 +161,107 @@ class Picrawler(Robot):
         else:
             return x
 
-    def limit_angle(self,angles):
+    def limit_angle(self, angles: List[float]) -> Tuple[bool, List[float]]:
+        """Ensure each angle is within the robot's allowed ranges.
+
+        Returns a tuple `(limit_flag, [alpha,beta,gamma])` where `limit_flag`
+        is True if any input value was clamped.
+        """
         alpha, beta, gamma = angles
-        # print('input: %s'%angles)
-        # limit 
         limit_flag = False
-        # alpha
-        temp = self.limit(-90,90,alpha)
+
+        # clamp each joint to its safe operating range
+        temp = self.limit(-90, 90, alpha)
         if temp != alpha:
             alpha = temp
             limit_flag = True
-        # beta
-        temp = self.limit(-10,90,beta)
+
+        temp = self.limit(-10, 90, beta)
         if temp != beta:
             beta = temp
             limit_flag = True
-        # gamma
-        temp = self.limit(-60,60,gamma)
+
+        temp = self.limit(-60, 60, gamma)
         if temp != gamma:
             gamma = temp
             limit_flag = True
-        #return
-        # print('output: %s'%[alpha,beta,gamma])
-        return limit_flag,[alpha,beta,gamma]
 
-    def do_action(self, motion_name, step=1, speed=50):
+        return limit_flag, [alpha, beta, gamma]
+
+    def do_action(self, motion_name: str, step: int = 1, speed: int = 50) -> None:
+        """Execute a named motion sequence `motion_name`.
+
+        Looks up the motion in the built-in `move_list` first; if not
+        found, tries `move_list_add` for user-defined sequences.
+        """
         try:
-            for _ in range(step): # times
+            for _ in range(step):  # repeat `step` times
+                # propagate stand position to the move list so properties can branch on it
                 self.move_list.stand_position = self.stand_position
                 if motion_name in ["forward", "backward", "turn left", "turn right", "turn left angle", "turn right angle"]:
+                    # toggle stance between gaits when performing directional moves
                     self.stand_position = self.stand_position + 1 & 1
                 action = self.move_list[motion_name]
-                for _step in action: # spyder motion
+                for _step in action:  # iterate over micro-steps in the gait
                     self.do_step(_step, speed=speed)
         except AttributeError:
             try:
+                # fallback to additional custom actions provided by the user
                 for _ in range(step):
                     action_add = self.move_list_add[motion_name]
                     for _step in action_add:
-                        self.do_step(_step, speed=speed) 
+                        self.do_step(_step, speed=speed)
             except KeyError:
                 print("No such action")
 
-    def set_angle(self, angles_list, speed=50, israise=False):
+    def set_angle(self, angles_list: List[List[float]], speed: int = 50, israise: bool = False) -> List[float]:
+        """Apply a list of joint `angles_list` to the servos.
+
+        Each entry in `angles_list` is an [alpha,beta,gamma] triple for a
+        leg. Values outside the safe range are either clamped or, if
+        `israise` is True, cause an exception.
+        """
         translate_list = []
         results = []
         for angles in angles_list:
             result, angles = self.limit_angle(angles)
             translate_list += angles
             results.append(result)
-        
+
         if True in results:
-            if israise == True:
+            if israise:
                 raise ValueError('\033[1;35mCoordinates out of controllable range.\033[0m')
             else:
                 try:
-                    # print('\033[1;35mCoordinates out of controllable range.\033[0m')
+                    # recalc current Cartesian coordinates from clamped angles
                     coords = []
-                    # Calculate coordinates 
                     for i in range(4):
-                        coords.append(self.polar2coord([translate_list[i*3],translate_list[i*3+1],translate_list[i*3+2]]))
+                        coords.append(self.polar2coord([translate_list[i * 3], translate_list[i * 3 + 1], translate_list[i * 3 + 2]]))
                     self.current_coord = list.copy(coords)
                 except Exception as e:
-                    print('re : %s'%e)
+                    print('re : %s' % e)
         else:
+            # accept the temporary coordinates computed earlier
             self.current_coord = list.copy(self.coord_temp)
 
-        self.servo_move(translate_list, speed)  
+        # send flattened angle list to low-level servo mover
+        self.servo_move(translate_list, speed)
         return list.copy(translate_list)
 
-    def do_step(self, _step, speed=50, israise=False):
+    def do_step(self, _step: Union[str, List[List[float]]], speed: int = 50, israise: bool = False) -> None:
+        """Execute a single step description `_step`.
+
+        `_step` may be a string key referencing a named gait in
+        `self.step_list` or an explicit list of leg Cartesian coordinates.
+        Each coordinate is converted to joint angles and applied.
+        """
         if isinstance(_step, str):
             if _step in self.step_list.keys():
                 for one_step in self.step_list[_step]:
                     angles_temp = []
-                    for coord in one_step: # each servo motion    
+                    for coord in one_step:  # each servo motion
                         alpha, beta, gamma = self.coord2polar(coord)
+                        # some code paths expect [beta, alpha, gamma] ordering
                         angles_temp.append([beta, alpha, gamma])
                     self.coord_temp = list.copy(one_step)
                     self.set_angle(angles_temp, speed, israise)
@@ -181,7 +269,7 @@ class Picrawler(Robot):
                 print("The name of gait is not in the default gait dictionary")
         elif isinstance(_step, list):
             angles_temp = []
-            for coord in _step: # each servo motion    
+            for coord in _step:  # each servo motion
                 alpha, beta, gamma = self.coord2polar(coord)
                 angles_temp.append([beta, alpha, gamma])
             self.coord_temp = list.copy(_step)
@@ -191,24 +279,31 @@ class Picrawler(Robot):
             return
 
 
-    def current_step_all_leg_angle(self):
+    def current_step_all_leg_angle(self) -> List[float]:
+        """Return a copy of the current servo positions (angles)."""
         return list.copy(self.servo_positions)
 
-    def add_action(self,action_name, action_list):
+    def add_action(self, action_name: str, action_list: Any) -> None:
+        """Register a user-defined action sequence under `action_name`."""
         self.move_list_add[action_name] = action_list
 
 
-    def cali_helper_web(self, leg, pos, enter):
-        step=0.2
+    def cali_helper_web(self, leg: int, pos: str, enter: int) -> None:
+        """Helper used by the web calibration UI to nudge leg `leg`.
+
+        `pos` is one of 'up','down','left','right','high','low'. When
+        `enter` is set, the computed offset is saved to persistent
+        storage via `set_offset`.
+        """
+        step = 0.2
         cali_position = []
         cali_coord = [[60, 0, -30], [60, 0, -30], [60, 0, -30], [60, 0, -30]]
 
-        for coord in cali_coord: # each servo motion
+        for coord in cali_coord:  # each servo motion
             alpha, beta, gamma = self.coord2polar(coord)
             cali_position += [beta, alpha, gamma]
 
         cali_position = [cali_position[i] + self.offset[i] for i in range(12)]
-        # print("cali_position:",cali_position)
 
         positive_list = [
             [1, -1, -1, 1, 1, -1],
@@ -216,7 +311,7 @@ class Picrawler(Robot):
             [-1, 1, 1, -1, 1, -1],
             [-1, 1, -1, 1, 1, -1],
         ]
-        
+
         offset = list.copy(self.offset)
         leg = leg - 1
         if pos == 'up':
@@ -231,17 +326,17 @@ class Picrawler(Robot):
             self.current_coord[leg][2] += step * positive_list[leg][4]
         elif pos == 'low':
             self.current_coord[leg][2] += step * positive_list[leg][5]
-        
+
+        # enforce workspace limits for each coordinate component
         for coord in self.current_coord:
             coord[0] = max(40, min(80, coord[0]))
             coord[1] = max(-20, min(20, coord[1]))
             coord[2] = max(-50, min(-10, coord[2]))
         self.do_step(self.current_coord, speed=100)
         current_position = list.copy(self.do_step(self.current_coord, speed=100))
-        # print('current_position: %s'%current_position)
         if enter == 1:
             tmp = [current_position[i] - cali_position[i] + offset[i] for i in range(len(current_position))]
-            offset[leg*3:(leg + 1)*3] = tmp[leg*3:(leg + 1)*3]
+            offset[leg * 3:(leg + 1) * 3] = tmp[leg * 3:(leg + 1) * 3]
             self.current_coord[leg] = [60, 0, -30]
             self.set_offset(offset)
             self.do_step(self.current_coord, speed=100)
@@ -625,19 +720,19 @@ class Picrawler(Robot):
 
 
 
-    def do_single_leg(self,leg,coodinate=[50,50,-33],speed=50):
+    def do_single_leg(self, leg: int, coodinate: List[float] = [50,50,-33], speed: int = 50) -> None:
         target_coord = self.current_step_all_leg_value()
         target_coord[leg] = coodinate
-        self.do_step(target_coord,speed)
+        self.do_step(target_coord, speed)
  
 
-    def current_step_leg_value(self,leg):
+    def current_step_leg_value(self, leg: int) -> List[float]:
         return list.copy(self.current_coord[leg])
         
-    def current_step_all_leg_value(self):
+    def current_step_all_leg_value(self) -> List[List[float]]:
         return list.copy(self.current_coord)
 
-    def mix_step(self,basic_step,leg,coodinate=[50,50,-33]):
+    def mix_step(self, basic_step: List[List[float]], leg: int, coodinate: List[float] = [50,50,-33]) -> List[List[float]]:
         # Pay attention to adding list(), otherwise the address pointer is returned
         new_step = list(basic_step)
         new_step[leg] = coodinate
